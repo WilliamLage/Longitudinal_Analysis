@@ -1,0 +1,226 @@
+---
+title: "Longitudinal Methods"
+author: "William Lage"
+date: "1/6/2021"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries}
+library(readr)
+library(readxl)
+library(mice)
+library(VIM)
+library(jmv)
+library(ggplot2)
+library(lme4)
+library(nlme)
+```
+
+```{r import data}
+WideF <- read_csv("Dataset.csv")
+```
+#Step 2: Cleaning Data
+##Formatting
+```{r changing row values Wide}
+#This is a longer route in case you want to remove specific values
+WideF$Dep1[WideF$Dep1=="6"]<-"NA"
+WideF$Dep1[WideF$Dep1=="8"]<-"NA"
+WideF$Dep2[WideF$Dep2=="6"]<-"NA"
+WideF$Dep2[WideF$Dep2=="8"]<-"NA"
+WideF$Dep3[WideF$Dep3=="6"]<-"NA"
+WideF$Dep3[WideF$Dep3=="8"]<-"NA"
+WideF$Dep3[WideF$Dep3=="9"]<-"NA"
+WideF$Dep4[WideF$Dep4=="6"]<-"NA"
+WideF$Dep4[WideF$Dep4=="8"]<-"NA"
+WideF$SES[WideF$SES=="9996"]<-"NA"
+WideF$BIO_SEX[WideF$BIO_SEX=="6"]<-"NA"
+WideF$BIO_SEX[WideF$BIO_SEX=="8"]<-"NA"
+
+
+#str allows us to check the structure of the data. As we can see many of the variables got recoded when we made our NAs. By using an as.integer function, we can force the computer to treat them as non-numbers in an integer variable
+str(WideF)
+WideF$Dep1 <- as.integer(WideF$Dep1)
+WideF$Dep2 <- as.integer(WideF$Dep2)
+WideF$Dep3 <- as.integer(WideF$Dep3)
+WideF$Dep4 <- as.integer(WideF$Dep4)
+WideF$SES <- as.integer(WideF$SES)
+WideF$BIO_SEX <- as.integer(WideF$BIO_SEX)
+```
+
+```{r patterns in NAs}
+md.pattern(WideF)
+mice_plot <-aggr(WideF, 
+                   col=c('navyblue', 'yellow'), 
+                   numbers = TRUE, 
+                   sortVars = TRUE, 
+                   labels = names(WideF), 
+                   cex.axis = .7, 
+                   gap = 3, 
+                   ylab = c("Missing data", "Pattern"))
+#What we see is there is no specific pattern, but there was high attrition in Wave 2
+```
+
+```{r pure descriptives}
+desc_full <- descriptives(data = WideF, 
+                        vars = c('Dep1','Dep2','Dep3','Dep4','SES', 'BIO_SEX'), 
+                        sd = TRUE, 
+                        skew = TRUE, 
+                        kurt = TRUE,
+                        hist = TRUE)
+desc_full
+```
+##Transformation and Subsetting
+```{r decisions}
+#we made a few decisions about the data.
+
+#1st: SES is too heavily skewed. Rather than transforming this variable we're going to identify the interquartile range (IQR)
+boxplot(WideF$SES, horizontal = TRUE)
+quantile(WideF$SES, na.rm = TRUE)
+#with an IQR of 38, the practice of using 1.5*IQR from the mean (40) means we split the data at 97k
+#We are therefor removing anyone whose parents made over 97k per year as non-normal
+WideF2 <- WideF[WideF$SES<=97, ]
+
+#2nd: we will not be keeping the NAs, we have enough data to not have to worry about them
+dat.listW <- na.omit(WideF2)
+
+#3rd: we don't need to have Sex as 1 & 2
+dat.listW$BIO_SEX <- dat.listW$BIO_SEX - 1
+```
+
+```{r multivariate normality}
+#Check and remove multivariate outliers based on mahalanobis' distance
+
+#Create a variable of mahalanobis' distance
+x <- dat.listW[2:7]
+mean <- colMeans(x)
+Sx <- cov(x)
+dat.listW$mahal <- mahalanobis(x, mean, Sx)
+
+#Identify any multivariate outliers based on mahalanobis' distance variable --> +/- 3 SD's of mahalanobis distance mean
+dat.listW[abs(scale(dat.listW$mahal)) > 3, ]
+
+#There are 254 multivariate outliers in Long Format which translates to 72 people removed in Wide Format.
+
+#Remove multivariate outliers
+CleanD <- dat.listW[!abs(scale(dat.listW$mahal)) > 3,]
+```
+```{r cleaned descriptives}
+desc_full <- descriptives(data = CleanD, 
+                        vars = c('Dep1','Dep2','Dep3','Dep4','SES', 'BIO_SEX'), 
+                        sd = TRUE, 
+                        skew = TRUE, 
+                        kurt = TRUE,
+                        hist = TRUE)
+desc_full
+```
+
+```{r long dep}
+#because the time-series functions require the data in long format we need to create a time variable
+LongD <- reshape(data = as.data.frame(CleanD),
+                        idvar='AID',
+                        varying=c('Dep1','Dep2','Dep3','Dep4'),
+                        times=c(1,2,3,4),
+                        v.names='Dep',                                            
+                        direction='long') 
+```
+
+```{r}
+#creating a plot and assigning it to an object 
+plot_obs <- ggplot(data=LongD,
+                   aes(x=time, y=Dep, group=AID)) +                                                   #calling variables
+                   geom_line() +                                                                     #adding lines to plot
+                   theme_bw() +                                                                      #changing style/background
+                   scale_x_continuous(breaks = c(1,2,3,4), name = "Wave") +   #creating breaks in the x-axis and labeling the x-axis
+                   scale_y_continuous(breaks = c(0,1,2,3), name = "Depression") #creating breaks in the y-axis and labeling the y-axis
+
+#printing the object (plot)
+print(plot_obs)
+```
+
+#comparing growth and no growth models to test if time is a factor
+```{r no-growth model}
+#fitting no growth model and assigning it to an object
+ng.lmer <- lmer(Dep ~ 1 + (1 | AID), 
+                     data = LongD, 
+                     REML = FALSE,
+                     na.action = "na.exclude")
+
+#obtaining summary of the model using the object we just created  
+summary(ng.lmer)
+```
+
+```{r linear growth model}
+#fitting linear growth model and assigning it to an object
+lg.dep.nlme <- nlme(Dep~(beta_1+d_1i)+(beta_2+d_2i)*(time),  
+                   data=LongD,                      
+                   fixed=beta_1+beta_2~1,                      
+                   random=d_1i+d_2i~1,
+                   group=~AID,                     
+                   start=c(beta_1=0,beta_2=0),
+                   na.action = "na.exclude")
+
+#obtaining summary of the model using the object we just created
+summary (lg.dep.nlme)
+```
+
+```{r quadratic growth model}
+#model did not converge in 50 iterations, so we're adjusting
+lmeCtlList <- lmeControl(maxIter = 500, msMaxIter = 200, tolerance = 1e-4, niter = 100,
+                         msTol = 1e-5, nlmStepMax = 500, 
+                         msVerbose = FALSE,
+                         returnObject = TRUE)
+
+quad.nlme <- nlme(Dep~b_1i+b_2i*(time)+b_3i*(time)^2,
+                      data=LongD,
+                      fixed=b_1i+b_2i+b_3i~1,
+                      random=b_1i+b_2i+b_3i~1,
+                      groups=~AID,
+                      start=c(0, 0, 0),
+                      na.action=na.exclude,
+                  control=lmeCtlList)
+summary(quad.nlme) 
+```
+
+```{r gm only SES}
+SES <- nlme(Dep ~ (beta_01 + beta_11*(SES/10) + d_1i) +
+                      (beta_02 + beta_12*(SES/10) + d_2i)*(time),
+        data=LongD,
+        fixed=beta_01+beta_11+beta_02+beta_12~1,
+        random=d_1i+d_2i~1,
+        group=~AID,
+        start=c(beta_01=0, beta_11=0, beta_02=0, beta_12=0),
+        na.action=na.exclude)
+
+summary(SES)
+```
+
+```{r}
+#for some reason, if this one has gender coded as 0/1 it doesn't run. So we boosted it back to 1/2 to get it running again. In interpretting, remember to use 1/2 for gender accordingly.
+SEX <- nlme(Dep ~ (beta_01 + beta_11*(BIO_SEX) + d_1i) +
+                      (beta_02 + beta_12*(BIO_SEX) + d_2i)*(time),
+        data=LongD,
+        fixed=beta_01+beta_11+beta_02+beta_12~1,
+        random=d_1i+d_2i~1,
+        group=~AID,
+        start=c(beta_01=0, beta_11=0, beta_02=0, beta_12=0),
+        na.action=na.exclude)
+
+summary(SEX)
+```
+```{r}
+lg.var <- nlme(Dep ~ (beta_01 + beta_11*(SES/10) + beta_21*BIO_SEX + d_1i) +
+                      (beta_02  + beta_12*(SES/10)+ beta_22*BIO_SEX +d_2i)*(time),
+        data=LongD,
+        fixed=beta_01+beta_11+beta_12+beta_21+beta_02+beta_22~1,
+        random=d_1i+d_2i~1,
+        group=~AID,
+        start=c(beta_01=0, beta_11=0, beta_12=0, beta_21=0, beta_02=0, beta_22=0),
+        na.action=na.exclude)
+
+summary(lg.var)
+#look to the equation to interpret the scores below. Remember outcome ~ intercept + slope * time
+```
